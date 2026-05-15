@@ -1,164 +1,101 @@
+import os
+import sys
 import time
+import json
+import subprocess
 import traceback
-import requests
-import hmac
-import hashlib
 
-# =========================
-# CYBRA CLASSES
-# =========================
+CYBRA_HOME = os.path.expanduser("~/.cybra")
+STATE_FILE = f"{CYBRA_HOME}/state.json"
+REPO_DIR = f"{CYBRA_HOME}/repo"
 
-class Config:
-    BASE = "https://api.bybit.com"
-    SYMBOL = "BTCUSDT"
-    CATEGORY = "spot"
-    QTY = "0.001"
-    LOOP = 2
-    WINDOW = 20
-    BUY_THRESHOLD = 1.001
-    SELL_THRESHOLD = 0.999
+OWNER = "Lubnysash1980"
 
+def ensure():
+    os.makedirs(CYBRA_HOME, exist_ok=True)
+    if not os.path.exists(STATE_FILE):
+        save_state({
+            "status": "active",
+            "mode": "autostable",
+            "owner": OWNER,
+            "crashes": 0,
+            "last_update": None
+        })
 
-class CybraMarket:
-    def price(self):
-        try:
-            r = requests.get(
-                Config.BASE + "/v5/market/tickers",
-                params={
-                    "category": Config.CATEGORY,
-                    "symbol": Config.SYMBOL
-                },
-                timeout=3
-            )
-            return float(r.json()["result"]["list"][0]["lastPrice"])
-        except Exception as e:
-            print("[MARKET ERROR]", e)
-            return None
+def load_state():
+    ensure()
+    with open(STATE_FILE) as f:
+        return json.load(f)
 
+def save_state(data):
+    os.makedirs(CYBRA_HOME, exist_ok=True)
+    with open(STATE_FILE, "w") as f:
+        json.dump(data, f, indent=2)
 
-class CybraStrategy:
-    def __init__(self):
-        self.buf = []
+class AutoStable:
+    def health(self):
+        st = load_state()
+        print("[CYBRA HEALTH]", st)
 
-    def signal(self, price):
-        self.buf.append(price)
+    def load(self):
+        st = load_state()
+        st["status"] = "loaded"
+        save_state(st)
+        print("[CYBRA] loaded")
 
-        if len(self.buf) > Config.WINDOW:
-            self.buf.pop(0)
+    def reload(self):
+        print("[CYBRA] reload runtime")
+        os.execv(sys.executable, [sys.executable] + sys.argv)
 
-        avg = sum(self.buf) / len(self.buf)
+    def update(self):
+        print("[CYBRA] update from git")
+        subprocess.run(["git", "-C", REPO_DIR, "pull"], check=False)
+        st = load_state()
+        st["last_update"] = time.time()
+        save_state(st)
 
-        if price > avg * Config.BUY_THRESHOLD:
-            return "Buy"
+    def upgrade(self):
+        print("[CYBRA] upgrade system")
+        self.update()
+        self.reload()
 
-        if price < avg * Config.SELL_THRESHOLD:
-            return "Sell"
+    def run(self):
+        print("====================================")
+        print(" CYBRA AUTOSTABLE ORCHESTRATOR")
+        print("====================================")
+        print("[OWNER]", OWNER)
+        print("[MODE] autostable")
+        print("[STATUS] active")
 
-        return "Hold"
-
-
-class CybraExchange:
-    def __init__(self, api_key, secret):
-        self.api_key = api_key
-        self.secret = secret
-
-    def sign(self, payload):
-        q = "&".join([f"{k}={v}" for k, v in sorted(payload.items())])
-        return hmac.new(
-            self.secret.encode(),
-            q.encode(),
-            hashlib.sha256
-        ).hexdigest()
-
-    def order(self, side):
-        ts = str(int(time.time() * 1000))
-
-        payload = {
-            "category": Config.CATEGORY,
-            "symbol": Config.SYMBOL,
-            "side": side,
-            "orderType": "Market",
-            "qty": Config.QTY,
-            "timestamp": ts
-        }
-
-        headers = {
-            "X-BAPI-API-KEY": self.api_key,
-            "X-BAPI-SIGN": self.sign(payload),
-            "X-BAPI-TIMESTAMP": ts
-        }
-
-        try:
-            r = requests.post(
-                Config.BASE + "/v5/order/create",
-                data=payload,
-                headers=headers,
-                timeout=5
-            )
-            print("[ORDER]", r.json())
-        except Exception as e:
-            print("[ORDER ERROR]", e)
-
-
-class AutoHeal:
-    def __init__(self):
-        self.crashes = 0
-
-    def protect(self, fn):
         while True:
             try:
-                fn()
-            except KeyboardInterrupt:
-                print("\n[CYBRA STOPPED]")
-                break
+                print("[CYBRA] stable heartbeat")
+                time.sleep(5)
             except Exception:
-                self.crashes += 1
-                print("[AUTOHEAL] crash:", self.crashes)
+                st = load_state()
+                st["crashes"] += 1
+                save_state(st)
                 traceback.print_exc()
                 time.sleep(3)
 
+def main():
+    ensure()
+    c = AutoStable()
 
-class Cybra:
-    def __init__(self):
-        print("====================================")
-        print(" CYBRA CLASS ENGINE + AUTOHEAL")
-        print("====================================")
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "run"
 
-        api = input("BYBIT API KEY: ").strip()
-        sec = input("BYBIT SECRET KEY: ").strip()
-
-        self.market = CybraMarket()
-        self.strategy = CybraStrategy()
-        self.exchange = CybraExchange(api, sec)
-
-    def run(self):
-        print("\n[CYBRA ACTIVE]\n")
-
-        while True:
-            p = self.market.price()
-
-            if not p:
-                print("[WAIT PRICE]")
-                time.sleep(Config.LOOP)
-                continue
-
-            sig = self.strategy.signal(p)
-
-            print("[PRICE]", p, "[SIGNAL]", sig)
-
-            if sig in ["Buy", "Sell"]:
-                self.exchange.order(sig)
-
-            time.sleep(Config.LOOP)
-
-
-# =========================
-# IMPORT CYBRA ENTRY
-# =========================
-
-def run():
-    AutoHeal().protect(lambda: Cybra().run())
-
+    if cmd == "health":
+        c.health()
+    elif cmd == "load":
+        c.load()
+    elif cmd == "reload":
+        c.reload()
+    elif cmd == "update":
+        c.update()
+    elif cmd == "upgrade":
+        c.upgrade()
+    else:
+        c.run()
 
 if __name__ == "__main__":
-    run()
+    main()
